@@ -1,0 +1,179 @@
+use axum::{
+    Router,
+    body::Body,
+    http::{HeaderValue, StatusCode, header},
+    response::{Html, IntoResponse, Response},
+    routing::get,
+};
+use std::{
+    io,
+    path::{self, PathBuf},
+};
+use tokio::fs;
+
+const IMAGE_PATH: &str = "/home/koushikk/Desktop/akane.jpg";
+
+#[tokio::main]
+async fn main() {
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/api/akane", get(image_bytes));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+        .await
+        .expect("failed to bind to 127.0.0.1:3000");
+
+    println!("Server running on http://127.0.0.1:3000");
+    // list_volumes();
+    let bomba = select_volume(list_volumes(), 4);
+    let fuck = chosen_volume(bomba.as_path()).expect("FUUUUCK");
+    quick(fuck);
+    axum::serve(listener, app).await.expect("server crashed");
+}
+
+async fn index() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Axum Raw Image Bytes</title>
+</head>
+<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;">
+  <img id="photo" alt="Loaded from Rust bytes" width="800" />
+
+  <script>
+    async function loadImage() {
+      const res = await fetch('/api/akane');
+      if (!res.ok) {
+        throw new Error(`Failed to fetch image bytes: ${res.status}`);
+      }
+
+      const bytes = await res.arrayBuffer(); // raw bytes from Rust
+      const blob = new Blob([bytes], { type: 'image/jpeg' });
+      const url = URL.createObjectURL(blob);
+      document.getElementById('photo').src = url;
+    }
+
+    loadImage().catch(err => {
+      document.body.innerHTML = `<pre>${err}</pre>`;
+      console.error(err);
+    });
+  </script>
+</body>
+</html>
+"#,
+    )
+}
+
+fn list_volumes() -> std::fs::ReadDir {
+    println!("Listing volumes");
+    let volumes = std::fs::read_dir("/home/koushikk/MANGA/nana").expect("Erorring getting volumes");
+    println!("{:?}", volumes);
+
+    volumes
+}
+#[derive(Ord, PartialEq, PartialOrd, Eq)]
+struct Volume {
+    location: std::path::PathBuf,
+}
+
+struct SelectedVolume {
+    page_count: usize,
+}
+
+fn volume_number(path: &std::path::Path) -> u32 {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .and_then(|name| name.rsplit('_').next()) // "7" from "nana_7"
+        .and_then(|n| n.parse::<u32>().ok())
+        .unwrap_or(u32::MAX) // e.g. "zips" goes last
+}
+
+fn select_volume(volumes: std::fs::ReadDir, num: usize) -> path::PathBuf {
+    let mut sorted: Vec<Volume> = Vec::new();
+
+    for v in volumes {
+        let w = Volume {
+            location: v.expect("cannot get path").path(),
+        };
+        if volume_number(&w.location) == u32::MAX {
+            continue;
+        }
+        sorted.push(w);
+    }
+    sorted.sort_by_key(|v| volume_number(&v.location));
+
+    // for v in sorted {
+    //     println!("{}", v.location.display());
+    // }
+    let kys = num - 1;
+    //   println!("The {}th volume is {}", num, sorted[kys].location.display());
+    let selected_volume = sorted[kys].location.clone();
+    selected_volume
+}
+
+//next function would be getting the pages into a list
+//
+
+#[derive(Debug)]
+struct Page {
+    number: usize,
+    path: PathBuf,
+}
+
+fn chosen_volume(cv: &std::path::Path) -> io::Result<Vec<Page>> {
+    println!("Selected to read this {}", cv.display());
+
+    //putpagesintoalistthencangetlenandpaths
+    //im make page path aswell tbf
+
+    let mut pages: Vec<path::PathBuf> = std::fs::read_dir(cv)?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    pages.sort();
+
+    let pages_structs: Vec<Page> = pages
+        .into_iter()
+        .enumerate()
+        .map(|(i, path)| Page {
+            number: i + 1,
+            path,
+        })
+        .collect();
+
+    //   println!("Page Count {}", pages.len());
+
+    Ok(pages_structs)
+}
+
+fn quick(page_structs: Vec<Page>) {
+    let page_structs = page_structs;
+
+    for p in page_structs {
+        println!(
+            "Page number {} and page count {}",
+            p.number,
+            p.path.display()
+        );
+    }
+}
+
+async fn image_bytes() -> Response {
+    match fs::read(IMAGE_PATH).await {
+        Ok(bytes) => {
+            let mut res = Response::new(Body::from(bytes));
+            res.headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
+            res
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not read image at {IMAGE_PATH}: {err}"),
+        )
+            .into_response(),
+    }
+}
+// so i want to like just put each page into a list, and i can just have a page type which would
+// have like the number and shit,and then
