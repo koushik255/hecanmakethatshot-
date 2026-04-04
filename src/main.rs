@@ -24,11 +24,16 @@ async fn main() {
         .expect("failed to bind to 127.0.0.1:3000");
 
     println!("Server running on http://127.0.0.1:3000");
-    // list_volumes();
+
+    axum::serve(listener, app).await.expect("server crashed");
+}
+
+fn gimme() -> PathBuf {
     let bomba = select_volume(list_volumes(), 4);
     let fuck = chosen_volume(bomba.as_path()).expect("FUUUUCK");
-    quick(fuck);
-    axum::serve(listener, app).await.expect("server crashed");
+    //   quick(fuck);
+    let first_page = fuck[0].path.clone();
+    first_page
 }
 
 async fn index() -> Html<&'static str> {
@@ -148,6 +153,12 @@ fn chosen_volume(cv: &std::path::Path) -> io::Result<Vec<Page>> {
     Ok(pages_structs)
 }
 
+// i want to just have way more information about each page, is should honeslty just get the width
+// and height and then like think about bigger pages
+// should just store the gimme() into state then i can just have an
+// intianal state with the gimmie() then from their i can just index + for
+// forward and backwards pages
+
 fn quick(page_structs: Vec<Page>) {
     let page_structs = page_structs;
 
@@ -161,7 +172,8 @@ fn quick(page_structs: Vec<Page>) {
 }
 
 async fn image_bytes() -> Response {
-    match fs::read(IMAGE_PATH).await {
+    let p = gimme();
+    match fs::read(p).await {
         Ok(bytes) => {
             let mut res = Response::new(Body::from(bytes));
             res.headers_mut()
@@ -175,5 +187,3 @@ async fn image_bytes() -> Response {
             .into_response(),
     }
 }
-// so i want to like just put each page into a list, and i can just have a page type which would
-// have like the number and shit,and then
