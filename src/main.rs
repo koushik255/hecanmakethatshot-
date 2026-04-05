@@ -20,6 +20,8 @@ struct AppState {
     pages: Arc<Vec<Page>>,
     current_page: Arc<RwLock<usize>>,
 }
+// so i should just make a path which has the next page
+// right now im just updating the bytes for the 1 image wihc is showing
 
 #[tokio::main]
 async fn main() {
@@ -28,12 +30,14 @@ async fn main() {
 
     let state = AppState {
         pages: Arc::new(pages),
-        current_page: Arc::new(RwLock::new(2)),
+        current_page: Arc::new(RwLock::new(0)),
     };
 
     let app = Router::new()
         .route("/", get(index))
-        .route("/api/akane", get(image_bytes))
+        .route("/api/akane", get(right_page_bytes))
+        .route("/api/right", get(right_page_bytes))
+        .route("/api/left", get(left_page_bytes))
         .route("/api/next", get(next_page))
         .with_state(state);
 
@@ -63,23 +67,61 @@ async fn index() -> Html<&'static str> {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Axum Raw Image Bytes</title>
 </head>
-<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;">
-  <img id="photo" alt="Loaded from Rust bytes" width="800" />
+<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#111;">
+  <div style="display:flex;gap:8px;align-items:flex-start;">
+    <img id="rightPhoto" alt="Right page" width="700" />
+    <img id="leftPhoto" alt="Left page" width="700" />
+  </div>
 
   <script>
-    async function loadImage() {
-      const res = await fetch('/api/akane');
-      if (!res.ok) {
-        throw new Error(`Failed to fetch image bytes: ${res.status}`);
+    async function loadImageInto(id, url, allowNoContent = false) {
+      const res = await fetch(url);
+      const img = document.getElementById(id);
+
+      if (allowNoContent && res.status === 204) {
+        if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
+        img.dataset.url = '';
+        img.removeAttribute('src');
+        return;
       }
 
-      const bytes = await res.arrayBuffer(); // raw bytes from Rust
+      if (!res.ok) {
+        throw new Error(`Failed to fetch ${url}: ${res.status}`);
+      }
+
+      const bytes = await res.arrayBuffer();
       const blob = new Blob([bytes], { type: 'image/jpeg' });
-      const url = URL.createObjectURL(blob);
-      document.getElementById('photo').src = url;
+      const objectUrl = URL.createObjectURL(blob);
+
+      if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
+      img.dataset.url = objectUrl;
+      img.src = objectUrl;
     }
 
-    loadImage().catch(err => {
+    async function loadSpread() {
+      await loadImageInto('rightPhoto', '/api/right');
+      await loadImageInto('leftPhoto', '/api/left', true);
+    }
+
+    async function nextPage() {
+      const res = await fetch('/api/next');
+      if (res.status === 200) {
+        await loadSpread();
+      } else if (res.status === 204) {
+        console.log('Already at last spread');
+      } else {
+        console.error('Failed to go to next spread', res.status);
+      }
+    }
+
+    window.addEventListener('keydown', async (e) => {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        await nextPage();
+      }
+    });
+
+    loadSpread().catch(err => {
       document.body.innerHTML = `<pre>${err}</pre>`;
       console.error(err);
     });
@@ -186,20 +228,34 @@ fn quick(page_structs: Vec<Page>) {
 async fn next_page(State(state): State<AppState>) -> Response {
     let mut idx = state.current_page.write().await;
 
-    if *idx + 1 < state.pages.len() {
-        *idx += 1;
-        (StatusCode::OK, format!("next page worked mud {}", *idx)).into_response()
+    if *idx + 2 < state.pages.len() {
+        *idx += 2;
+        (StatusCode::OK, format!("next spread worked mud {}", *idx)).into_response()
     } else {
-        (StatusCode::NO_CONTENT, "Already at last page ").into_response()
+        (StatusCode::NO_CONTENT, "Already at last spread").into_response()
     }
 }
 
-async fn image_bytes(State(state): State<AppState>) -> Response {
+async fn right_page_bytes(State(state): State<AppState>) -> Response {
     let idx = *state.current_page.read().await;
+    image_bytes_for_idx(&state, idx).await
+}
 
+async fn left_page_bytes(State(state): State<AppState>) -> Response {
+    let idx = state.current_page.read().await.saturating_add(1);
+
+    if idx >= state.pages.len() {
+        return (StatusCode::NO_CONTENT, "No left page for this spread").into_response();
+    }
+
+    image_bytes_for_idx(&state, idx).await
+}
+
+async fn image_bytes_for_idx(state: &AppState, idx: usize) -> Response {
     let Some(page) = state.pages.get(idx) else {
         return (StatusCode::NOT_FOUND, format!("no page found mud")).into_response();
     };
+
     match fs::read(&page.path).await {
         Ok(bytes) => {
             let mut res = Response::new(Body::from(bytes));
