@@ -1,6 +1,7 @@
 use axum::{
     Router,
     body::Body,
+    extract::State,
     http::{HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::get,
@@ -8,16 +9,33 @@ use axum::{
 use std::{
     io,
     path::{self, PathBuf},
+    sync::Arc,
 };
-use tokio::fs;
+use tokio::{fs, sync::RwLock};
 
 const IMAGE_PATH: &str = "/home/koushikk/Desktop/akane.jpg";
 
+#[derive(Clone)]
+struct AppState {
+    pages: Arc<Vec<Page>>,
+    current_page: Arc<RwLock<usize>>,
+}
+
 #[tokio::main]
 async fn main() {
+    let volume_path = select_volume(list_volumes(), 1);
+    let pages = chosen_volume(volume_path.as_path()).expect("failed to read selected volume");
+
+    let state = AppState {
+        pages: Arc::new(pages),
+        current_page: Arc::new(RwLock::new(2)),
+    };
+
     let app = Router::new()
         .route("/", get(index))
-        .route("/api/akane", get(image_bytes));
+        .route("/api/akane", get(image_bytes))
+        .route("/api/next", get(next_page))
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
@@ -153,12 +171,6 @@ fn chosen_volume(cv: &std::path::Path) -> io::Result<Vec<Page>> {
     Ok(pages_structs)
 }
 
-// i want to just have way more information about each page, is should honeslty just get the width
-// and height and then like think about bigger pages
-// should just store the gimme() into state then i can just have an
-// intianal state with the gimmie() then from their i can just index + for
-// forward and backwards pages
-
 fn quick(page_structs: Vec<Page>) {
     let page_structs = page_structs;
 
@@ -171,9 +183,24 @@ fn quick(page_structs: Vec<Page>) {
     }
 }
 
-async fn image_bytes() -> Response {
-    let p = gimme();
-    match fs::read(p).await {
+async fn next_page(State(state): State<AppState>) -> Response {
+    let mut idx = state.current_page.write().await;
+
+    if *idx + 1 < state.pages.len() {
+        *idx += 1;
+        (StatusCode::OK, format!("next page worked mud {}", *idx)).into_response()
+    } else {
+        (StatusCode::NO_CONTENT, "Already at last page ").into_response()
+    }
+}
+
+async fn image_bytes(State(state): State<AppState>) -> Response {
+    let idx = *state.current_page.read().await;
+
+    let Some(page) = state.pages.get(idx) else {
+        return (StatusCode::NOT_FOUND, format!("no page found mud")).into_response();
+    };
+    match fs::read(&page.path).await {
         Ok(bytes) => {
             let mut res = Response::new(Body::from(bytes));
             res.headers_mut()
