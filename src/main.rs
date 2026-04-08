@@ -4,42 +4,68 @@ use axum::{
     extract::State,
     http::{HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use std::{
     io,
-    path::{self, PathBuf},
+    path::{self, Path, PathBuf},
     sync::Arc,
 };
 use tokio::{fs, sync::RwLock};
 
 const IMAGE_PATH: &str = "/home/koushikk/Desktop/akane.jpg";
+const MANGA_ROOT: &str = "/home/koushikk/MANGA/Kingdom/";
+const SELECTED_MANGA: &str = "Kingdom";
+const BOOKMARKS_PATH: &str = "bookmarks.json";
 const INDEX_HTML: &str = include_str!("../static/index.html");
+const INDEX_JS: &str = include_str!("../static/index.js");
 
 #[derive(Clone)]
 struct AppState {
     pages: Arc<Vec<Page>>,
-    current_page: Arc<RwLock<usize>>,
+    steps: Arc<Vec<ViewStep>>,
+    current_step: Arc<RwLock<usize>>,
+    current_volume: usize,
 }
-// so i should just make a path which has the next page
-// right now im just updating the bytes for the 1 image wihc is showing
+#[derive(Clone, Copy)]
+enum ViewStep {
+    Single(usize),
+    Spread { right: usize, left: usize },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Bookmark {
+    volume: usize,
+    kind: String,
+    right_path: String,
+    left_path: Option<String>,
+}
 
 #[tokio::main]
 async fn main() {
-    let volume_path = select_volume(list_volumes(), 1);
+    let manga_dir = PathBuf::from(MANGA_ROOT).join(SELECTED_MANGA);
+
+    let volume_number: usize = 45;
+    let volume_path = select_volume(list_volumes(manga_dir.as_path()), volume_number);
     let pages = chosen_volume(volume_path.as_path()).expect("failed to read selected volume");
+    let steps = build_view_steps(&pages);
 
     let state = AppState {
         pages: Arc::new(pages),
-        current_page: Arc::new(RwLock::new(0)),
+        steps: Arc::new(steps),
+        current_step: Arc::new(RwLock::new(0)),
+        current_volume: volume_number,
     };
 
     let app = Router::new()
         .route("/", get(index))
+        .route("/index.js", get(index_js))
         .route("/api/akane", get(right_page_bytes))
         .route("/api/right", get(right_page_bytes))
         .route("/api/left", get(left_page_bytes))
         .route("/api/next", get(next_page))
+        .route("/api/prev", get(prev_page))
+        .route("/api/bookmark", post(add_bookmark))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
@@ -52,7 +78,8 @@ async fn main() {
 }
 
 fn gimme() -> PathBuf {
-    let bomba = select_volume(list_volumes(), 4);
+    let manga_dir = PathBuf::from(MANGA_ROOT).join(SELECTED_MANGA);
+    let bomba = select_volume(list_volumes(manga_dir.as_path()), 4);
     let fuck = chosen_volume(bomba.as_path()).expect("FUUUUCK");
     //   quick(fuck);
     let first_page = fuck[0].path.clone();
@@ -63,9 +90,18 @@ async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
-fn list_volumes() -> std::fs::ReadDir {
-    println!("Listing volumes");
-    let volumes = std::fs::read_dir("/home/koushikk/MANGA/nana").expect("Erorring getting volumes");
+async fn index_js() -> Response {
+    let mut res = Response::new(Body::from(INDEX_JS));
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/javascript; charset=utf-8"),
+    );
+    res
+}
+
+fn list_volumes(manga_dir: &std::path::Path) -> std::fs::ReadDir {
+    println!("Listing volumes in {}", manga_dir.display());
+    let volumes = std::fs::read_dir(manga_dir).expect("Erorring getting volumes");
     println!("{:?}", volumes);
 
     volumes
@@ -156,29 +192,159 @@ fn quick(page_structs: Vec<Page>) {
     }
 }
 
-async fn next_page(State(state): State<AppState>) -> Response {
-    let mut idx = state.current_page.write().await;
+fn is_landscape(path: &Path) -> bool {
+    match image::image_dimensions(path) {
+        Ok((w, h)) => w > h,
+        Err(_) => false,
+    }
+}
 
-    if *idx + 2 < state.pages.len() {
-        *idx += 2;
+fn build_view_steps(pages: &[Page]) -> Vec<ViewStep> {
+    let mut steps = Vec::new();
+    if pages.is_empty() {
+        return steps;
+    }
+
+    let last = pages.len() - 1;
+    let mut i = 0;
+
+    while i < pages.len() {
+        let solo = i == 0 || i == last || is_landscape(&pages[i].path);
+
+        if solo {
+            steps.push(ViewStep::Single(i));
+            i += 1;
+            continue;
+        }
+
+        if i + 1 <= last && i + 1 != last && !is_landscape(&pages[i + 1].path) {
+            steps.push(ViewStep::Spread {
+                right: i,
+                left: i + 1,
+            });
+            i += 2;
+        } else {
+            steps.push(ViewStep::Single(i));
+            i += 1;
+        }
+    }
+
+    steps
+}
+
+async fn next_page(State(state): State<AppState>) -> Response {
+    let mut idx = state.current_step.write().await;
+
+    if *idx + 1 < state.steps.len() {
+        *idx += 1;
         (StatusCode::OK, format!("next spread worked mud {}", *idx)).into_response()
     } else {
         (StatusCode::NO_CONTENT, "Already at last spread").into_response()
     }
 }
 
+async fn prev_page(State(state): State<AppState>) -> Response {
+    let mut idx = state.current_step.write().await;
+
+    if *idx > 0 {
+        *idx -= 1;
+        (StatusCode::OK, format!("prev spread worked mud {}", *idx)).into_response()
+    } else {
+        (StatusCode::NO_CONTENT, "Already at first spread").into_response()
+    }
+}
+
+async fn add_bookmark(State(state): State<AppState>) -> Response {
+    let step_idx = *state.current_step.read().await;
+
+    let Some(step) = state.steps.get(step_idx) else {
+        return (StatusCode::NOT_FOUND, "No step found").into_response();
+    };
+
+    let bookmark = match *step {
+        ViewStep::Single(i) => {
+            let Some(page) = state.pages.get(i) else {
+                return (StatusCode::NOT_FOUND, "No page found").into_response();
+            };
+            Bookmark {
+                volume: state.current_volume,
+                kind: "single".to_string(),
+                right_path: page.path.display().to_string(),
+                left_path: None,
+            }
+        }
+        ViewStep::Spread { right, left } => {
+            let Some(right_page) = state.pages.get(right) else {
+                return (StatusCode::NOT_FOUND, "No right page found").into_response();
+            };
+            let Some(left_page) = state.pages.get(left) else {
+                return (StatusCode::NOT_FOUND, "No left page found").into_response();
+            };
+            Bookmark {
+                volume: state.current_volume,
+                kind: "spread".to_string(),
+                right_path: right_page.path.display().to_string(),
+                left_path: Some(left_page.path.display().to_string()),
+            }
+        }
+    };
+
+    let mut bookmarks: Vec<Bookmark> = match fs::read_to_string(BOOKMARKS_PATH).await {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+
+    bookmarks.push(bookmark);
+
+    let body = match serde_json::to_string_pretty(&bookmarks) {
+        Ok(json) => json,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to serialize bookmarks: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    match fs::write(BOOKMARKS_PATH, body).await {
+        Ok(_) => (StatusCode::CREATED, "bookmark saved").into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write bookmarks: {err}"),
+        )
+            .into_response(),
+    }
+}
+
 async fn right_page_bytes(State(state): State<AppState>) -> Response {
-    let idx = *state.current_page.read().await;
+    let step_idx = *state.current_step.read().await;
+
+    let Some(step) = state.steps.get(step_idx) else {
+        return (StatusCode::NOT_FOUND, "No step found").into_response();
+    };
+
+    let idx = match *step {
+        ViewStep::Single(i) => i,
+        ViewStep::Spread { right, .. } => right,
+    };
+
     image_bytes_for_idx(&state, idx).await
 }
 
 async fn left_page_bytes(State(state): State<AppState>) -> Response {
-    let idx = state.current_page.read().await.saturating_add(1);
-    //since its just the |3|2| we just satur add same same
+    let step_idx = *state.current_step.read().await;
 
-    if idx >= state.pages.len() {
-        return (StatusCode::NO_CONTENT, "No left page for this spread").into_response();
-    }
+    let Some(step) = state.steps.get(step_idx) else {
+        return (StatusCode::NOT_FOUND, "No step found").into_response();
+    };
+
+    let idx = match *step {
+        ViewStep::Single(_) => {
+            return (StatusCode::NO_CONTENT, "No left page for this spread").into_response();
+        }
+        ViewStep::Spread { left, .. } => left,
+    };
 
     image_bytes_for_idx(&state, idx).await
 }
