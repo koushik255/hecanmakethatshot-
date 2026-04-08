@@ -1,3 +1,5 @@
+mod marked;
+
 use axum::{
     Router,
     body::Body,
@@ -6,6 +8,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
+use marked::{add_bookmark, add_pagemark};
 use std::{
     io,
     path::{self, Path, PathBuf},
@@ -16,29 +19,20 @@ use tokio::{fs, sync::RwLock};
 const IMAGE_PATH: &str = "/home/koushikk/Desktop/akane.jpg";
 const MANGA_ROOT: &str = "/home/koushikk/MANGA/Kingdom/";
 const SELECTED_MANGA: &str = "Kingdom";
-const BOOKMARKS_PATH: &str = "bookmarks.json";
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const INDEX_JS: &str = include_str!("../static/index.js");
 
 #[derive(Clone)]
-struct AppState {
-    pages: Arc<Vec<Page>>,
-    steps: Arc<Vec<ViewStep>>,
-    current_step: Arc<RwLock<usize>>,
-    current_volume: usize,
+pub(crate) struct AppState {
+    pub(crate) pages: Arc<Vec<Page>>,
+    pub(crate) steps: Arc<Vec<ViewStep>>,
+    pub(crate) current_step: Arc<RwLock<usize>>,
+    pub(crate) current_volume: usize,
 }
 #[derive(Clone, Copy)]
-enum ViewStep {
+pub(crate) enum ViewStep {
     Single(usize),
     Spread { right: usize, left: usize },
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Bookmark {
-    volume: usize,
-    kind: String,
-    right_path: String,
-    left_path: Option<String>,
 }
 
 #[tokio::main]
@@ -66,6 +60,7 @@ async fn main() {
         .route("/api/next", get(next_page))
         .route("/api/prev", get(prev_page))
         .route("/api/bookmark", post(add_bookmark))
+        .route("/api/pagemark", post(add_pagemark))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
@@ -150,9 +145,9 @@ fn select_volume(volumes: std::fs::ReadDir, num: usize) -> path::PathBuf {
 //
 
 #[derive(Debug)]
-struct Page {
+pub(crate) struct Page {
     number: usize,
-    path: PathBuf,
+    pub(crate) path: PathBuf,
 }
 
 fn chosen_volume(cv: &std::path::Path) -> io::Result<Vec<Page>> {
@@ -251,69 +246,6 @@ async fn prev_page(State(state): State<AppState>) -> Response {
         (StatusCode::OK, format!("prev spread worked mud {}", *idx)).into_response()
     } else {
         (StatusCode::NO_CONTENT, "Already at first spread").into_response()
-    }
-}
-
-async fn add_bookmark(State(state): State<AppState>) -> Response {
-    let step_idx = *state.current_step.read().await;
-
-    let Some(step) = state.steps.get(step_idx) else {
-        return (StatusCode::NOT_FOUND, "No step found").into_response();
-    };
-
-    let bookmark = match *step {
-        ViewStep::Single(i) => {
-            let Some(page) = state.pages.get(i) else {
-                return (StatusCode::NOT_FOUND, "No page found").into_response();
-            };
-            Bookmark {
-                volume: state.current_volume,
-                kind: "single".to_string(),
-                right_path: page.path.display().to_string(),
-                left_path: None,
-            }
-        }
-        ViewStep::Spread { right, left } => {
-            let Some(right_page) = state.pages.get(right) else {
-                return (StatusCode::NOT_FOUND, "No right page found").into_response();
-            };
-            let Some(left_page) = state.pages.get(left) else {
-                return (StatusCode::NOT_FOUND, "No left page found").into_response();
-            };
-            Bookmark {
-                volume: state.current_volume,
-                kind: "spread".to_string(),
-                right_path: right_page.path.display().to_string(),
-                left_path: Some(left_page.path.display().to_string()),
-            }
-        }
-    };
-
-    let mut bookmarks: Vec<Bookmark> = match fs::read_to_string(BOOKMARKS_PATH).await {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
-
-    bookmarks.push(bookmark);
-
-    let body = match serde_json::to_string_pretty(&bookmarks) {
-        Ok(json) => json,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to serialize bookmarks: {err}"),
-            )
-                .into_response();
-        }
-    };
-
-    match fs::write(BOOKMARKS_PATH, body).await {
-        Ok(_) => (StatusCode::CREATED, "bookmark saved").into_response(),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to write bookmarks: {err}"),
-        )
-            .into_response(),
     }
 }
 

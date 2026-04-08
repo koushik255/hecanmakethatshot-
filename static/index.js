@@ -99,6 +99,15 @@ async function addBookmark() {
   }
 }
 
+async function addPageMark() {
+  const res = await fetch('/api/pagemark', { method: 'POST' });
+  if (res.status === 201) {
+    console.log('pagemark saved');
+  } else {
+    console.error('Failed to save pagemark', res.status);
+  }
+}
+
 window.addEventListener('keydown', async (e) => {
   if (e.code === 'Space' || e.code === 'ArrowRight') {
     e.preventDefault();
@@ -109,6 +118,9 @@ window.addEventListener('keydown', async (e) => {
   } else if (e.key === 'm' || e.key === 'M') {
     e.preventDefault();
     await addBookmark();
+  } else if (e.key === 't' || e.key === 'T') {
+    e.preventDefault();
+    await addPageMark();
   }
 });
 
