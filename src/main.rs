@@ -3,12 +3,12 @@ mod marked;
 use axum::{
     Router,
     body::Body,
-    extract::State,
+    extract::{Query, State},
     http::{HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
-use marked::{add_bookmark, add_pagemark};
+use marked::{add_bookmark, add_pagemark, list_pagemarks};
 use std::{
     io,
     path::{self, Path, PathBuf},
@@ -21,6 +21,8 @@ const MANGA_ROOT: &str = "/home/koushikk/MANGA/Kingdom/";
 const SELECTED_MANGA: &str = "Kingdom";
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const INDEX_JS: &str = include_str!("../static/index.js");
+const PM_HTML: &str = include_str!("../static/pm.html");
+const PM_JS: &str = include_str!("../static/pm.js");
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -39,7 +41,7 @@ pub(crate) enum ViewStep {
 async fn main() {
     let manga_dir = PathBuf::from(MANGA_ROOT).join(SELECTED_MANGA);
 
-    let volume_number: usize = 45;
+    let volume_number: usize = 49;
     let volume_path = select_volume(list_volumes(manga_dir.as_path()), volume_number);
     let pages = chosen_volume(volume_path.as_path()).expect("failed to read selected volume");
     let steps = build_view_steps(&pages);
@@ -54,6 +56,8 @@ async fn main() {
     let app = Router::new()
         .route("/", get(index))
         .route("/index.js", get(index_js))
+        .route("/pm", get(pm_page))
+        .route("/pm.js", get(pm_js))
         .route("/api/akane", get(right_page_bytes))
         .route("/api/right", get(right_page_bytes))
         .route("/api/left", get(left_page_bytes))
@@ -61,6 +65,8 @@ async fn main() {
         .route("/api/prev", get(prev_page))
         .route("/api/bookmark", post(add_bookmark))
         .route("/api/pagemark", post(add_pagemark))
+        .route("/api/pagemarks", get(list_pagemarks))
+        .route("/api/image-by-path", get(image_by_path))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
@@ -87,6 +93,19 @@ async fn index() -> Html<&'static str> {
 
 async fn index_js() -> Response {
     let mut res = Response::new(Body::from(INDEX_JS));
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/javascript; charset=utf-8"),
+    );
+    res
+}
+
+async fn pm_page() -> Html<&'static str> {
+    Html(PM_HTML)
+}
+
+async fn pm_js() -> Response {
+    let mut res = Response::new(Body::from(PM_JS));
     res.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/javascript; charset=utf-8"),
@@ -287,6 +306,31 @@ async fn image_bytes_for_idx(state: &AppState, idx: usize) -> Response {
     };
 
     match fs::read(&page.path).await {
+        Ok(bytes) => {
+            let mut res = Response::new(Body::from(bytes));
+            res.headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
+            res
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not read image at {IMAGE_PATH}: {err}"),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ImagePathQuery {
+    path: String,
+}
+
+async fn image_by_path(Query(q): Query<ImagePathQuery>) -> Response {
+    image_bytes_for_path(Path::new(&q.path)).await
+}
+
+async fn image_bytes_for_path(p: &Path) -> Response {
+    match fs::read(p).await {
         Ok(bytes) => {
             let mut res = Response::new(Body::from(bytes));
             res.headers_mut()

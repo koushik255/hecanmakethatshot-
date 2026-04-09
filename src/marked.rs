@@ -1,6 +1,7 @@
 use axum::{
+    body::Body,
     extract::State,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use tokio::fs;
@@ -150,4 +151,31 @@ pub(crate) async fn add_pagemark(State(state): State<AppState>) -> Response {
         )
             .into_response(),
     }
+}
+
+pub(crate) async fn list_pagemarks() -> Response {
+    let mut pagemarks: Vec<PageMark> = match fs::read_to_string(PAGEMARKS_PATH).await {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+
+    pagemarks.reverse();
+
+    let body = match serde_json::to_string_pretty(&pagemarks) {
+        Ok(json) => json,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to serialize pagemarks: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let mut res = Response::new(Body::from(body));
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    res
 }
