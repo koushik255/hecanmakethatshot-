@@ -30,36 +30,38 @@ struct PageMark {
 }
 
 pub(crate) async fn add_bookmark(State(state): State<AppState>) -> Response {
-    let step_idx = *state.current_step.read().await;
+    let bookmark = {
+        let reader = state.reader.read().await;
 
-    let Some(step) = state.steps.get(step_idx) else {
-        return (StatusCode::NOT_FOUND, "No step found").into_response();
-    };
+        let Some(step) = reader.steps.get(reader.current_step) else {
+            return (StatusCode::NOT_FOUND, "No step found").into_response();
+        };
 
-    let bookmark = match *step {
-        ViewStep::Single(i) => {
-            let Some(page) = state.pages.get(i) else {
-                return (StatusCode::NOT_FOUND, "No page found").into_response();
-            };
-            Bookmark {
-                volume: state.current_volume,
-                kind: "single".to_string(),
-                right_path: page.path.display().to_string(),
-                left_path: None,
+        match *step {
+            ViewStep::Single(i) => {
+                let Some(page) = reader.pages.get(i) else {
+                    return (StatusCode::NOT_FOUND, "No page found").into_response();
+                };
+                Bookmark {
+                    volume: reader.current_volume,
+                    kind: "single".to_string(),
+                    right_path: page.path.display().to_string(),
+                    left_path: None,
+                }
             }
-        }
-        ViewStep::Spread { right, left } => {
-            let Some(right_page) = state.pages.get(right) else {
-                return (StatusCode::NOT_FOUND, "No right page found").into_response();
-            };
-            let Some(left_page) = state.pages.get(left) else {
-                return (StatusCode::NOT_FOUND, "No left page found").into_response();
-            };
-            Bookmark {
-                volume: state.current_volume,
-                kind: "spread".to_string(),
-                right_path: right_page.path.display().to_string(),
-                left_path: Some(left_page.path.display().to_string()),
+            ViewStep::Spread { right, left } => {
+                let Some(right_page) = reader.pages.get(right) else {
+                    return (StatusCode::NOT_FOUND, "No right page found").into_response();
+                };
+                let Some(left_page) = reader.pages.get(left) else {
+                    return (StatusCode::NOT_FOUND, "No left page found").into_response();
+                };
+                Bookmark {
+                    volume: reader.current_volume,
+                    kind: "spread".to_string(),
+                    right_path: right_page.path.display().to_string(),
+                    left_path: Some(left_page.path.display().to_string()),
+                }
             }
         }
     };
@@ -93,34 +95,36 @@ pub(crate) async fn add_bookmark(State(state): State<AppState>) -> Response {
 }
 
 pub(crate) async fn add_pagemark(State(state): State<AppState>) -> Response {
-    let step_idx = *state.current_step.read().await;
+    let pagemark = {
+        let reader = state.reader.read().await;
 
-    let Some(step) = state.steps.get(step_idx) else {
-        return (StatusCode::NOT_FOUND, "No step found").into_response();
-    };
+        let Some(step) = reader.steps.get(reader.current_step) else {
+            return (StatusCode::NOT_FOUND, "No step found").into_response();
+        };
 
-    let pagemark = match *step {
-        ViewStep::Single(i) => {
-            let Some(page) = state.pages.get(i) else {
-                return (StatusCode::NOT_FOUND, "No page found").into_response();
-            };
-            PageMark {
-                pathleft: None,
-                pathright: page.path.display().to_string(),
-                volume: state.current_volume,
+        match *step {
+            ViewStep::Single(i) => {
+                let Some(page) = reader.pages.get(i) else {
+                    return (StatusCode::NOT_FOUND, "No page found").into_response();
+                };
+                PageMark {
+                    pathleft: None,
+                    pathright: page.path.display().to_string(),
+                    volume: reader.current_volume,
+                }
             }
-        }
-        ViewStep::Spread { right, left } => {
-            let Some(right_page) = state.pages.get(right) else {
-                return (StatusCode::NOT_FOUND, "No right page found").into_response();
-            };
-            let Some(left_page) = state.pages.get(left) else {
-                return (StatusCode::NOT_FOUND, "No left page found").into_response();
-            };
-            PageMark {
-                pathleft: Some(left_page.path.display().to_string()),
-                pathright: right_page.path.display().to_string(),
-                volume: state.current_volume,
+            ViewStep::Spread { right, left } => {
+                let Some(right_page) = reader.pages.get(right) else {
+                    return (StatusCode::NOT_FOUND, "No right page found").into_response();
+                };
+                let Some(left_page) = reader.pages.get(left) else {
+                    return (StatusCode::NOT_FOUND, "No left page found").into_response();
+                };
+                PageMark {
+                    pathleft: Some(left_page.path.display().to_string()),
+                    pathright: right_page.path.display().to_string(),
+                    volume: reader.current_volume,
+                }
             }
         }
     };

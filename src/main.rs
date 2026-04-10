@@ -1,4 +1,5 @@
 mod marked;
+mod tool;
 
 use axum::{
     Router,
@@ -8,6 +9,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
+use clap::Parser;
 use marked::{add_bookmark, add_pagemark, list_pagemarks};
 use std::{
     io,
@@ -15,6 +17,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{fs, sync::RwLock};
+use tool::spawn_mem_logger;
 
 const IMAGE_PATH: &str = "/home/koushikk/Desktop/akane.jpg";
 const MANGA_ROOT: &str = "/home/koushikk/MANGA/Kingdom/";
@@ -26,31 +29,48 @@ const PM_JS: &str = include_str!("../static/pm.js");
 
 #[derive(Clone)]
 pub(crate) struct AppState {
-    pub(crate) pages: Arc<Vec<Page>>,
-    pub(crate) steps: Arc<Vec<ViewStep>>,
-    pub(crate) current_step: Arc<RwLock<usize>>,
+    pub(crate) reader: Arc<RwLock<ReaderState>>,
+}
+
+pub(crate) struct ReaderState {
+    pub(crate) pages: Vec<Page>,
+    pub(crate) steps: Vec<ViewStep>,
+    pub(crate) current_step: usize,
     pub(crate) current_volume: usize,
 }
+
 #[derive(Clone, Copy)]
 pub(crate) enum ViewStep {
     Single(usize),
     Spread { right: usize, left: usize },
 }
 
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(long, default_value_t = false)]
+    mem_log: bool,
+}
+
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
+    if args.mem_log {
+        spawn_mem_logger(60);
+    }
     let manga_dir = PathBuf::from(MANGA_ROOT).join(SELECTED_MANGA);
 
-    let volume_number: usize = 49;
+    let volume_number: usize = 60;
     let volume_path = select_volume(list_volumes(manga_dir.as_path()), volume_number);
     let pages = chosen_volume(volume_path.as_path()).expect("failed to read selected volume");
     let steps = build_view_steps(&pages);
 
     let state = AppState {
-        pages: Arc::new(pages),
-        steps: Arc::new(steps),
-        current_step: Arc::new(RwLock::new(0)),
-        current_volume: volume_number,
+        reader: Arc::new(RwLock::new(ReaderState {
+            pages,
+            steps,
+            current_step: 0,
+            current_volume: volume_number,
+        })),
     };
 
     let app = Router::new()
@@ -63,6 +83,7 @@ async fn main() {
         .route("/api/left", get(left_page_bytes))
         .route("/api/next", get(next_page))
         .route("/api/prev", get(prev_page))
+        .route("/api/volume/next", post(next_volume))
         .route("/api/bookmark", post(add_bookmark))
         .route("/api/pagemark", post(add_pagemark))
         .route("/api/pagemarks", get(list_pagemarks))
@@ -74,6 +95,9 @@ async fn main() {
         .expect("failed to bind to 127.0.0.1:3000");
 
     println!("Server running on http://127.0.0.1:3000");
+    if args.mem_log {
+        println!("Memory logger enabled (60s interval)");
+    }
 
     axum::serve(listener, app).await.expect("server crashed");
 }
@@ -247,65 +271,110 @@ fn build_view_steps(pages: &[Page]) -> Vec<ViewStep> {
 }
 
 async fn next_page(State(state): State<AppState>) -> Response {
-    let mut idx = state.current_step.write().await;
+    let mut reader = state.reader.write().await;
 
-    if *idx + 1 < state.steps.len() {
-        *idx += 1;
-        (StatusCode::OK, format!("next spread worked mud {}", *idx)).into_response()
+    if reader.current_step + 1 < reader.steps.len() {
+        reader.current_step += 1;
+        (
+            StatusCode::OK,
+            format!("next spread worked mud {}", reader.current_step),
+        )
+            .into_response()
     } else {
         (StatusCode::NO_CONTENT, "Already at last spread").into_response()
     }
 }
 
 async fn prev_page(State(state): State<AppState>) -> Response {
-    let mut idx = state.current_step.write().await;
+    let mut reader = state.reader.write().await;
 
-    if *idx > 0 {
-        *idx -= 1;
-        (StatusCode::OK, format!("prev spread worked mud {}", *idx)).into_response()
+    if reader.current_step > 0 {
+        reader.current_step -= 1;
+        (
+            StatusCode::OK,
+            format!("prev spread worked mud {}", reader.current_step),
+        )
+            .into_response()
     } else {
         (StatusCode::NO_CONTENT, "Already at first spread").into_response()
     }
 }
 
-async fn right_page_bytes(State(state): State<AppState>) -> Response {
-    let step_idx = *state.current_step.read().await;
-
-    let Some(step) = state.steps.get(step_idx) else {
-        return (StatusCode::NOT_FOUND, "No step found").into_response();
+async fn next_volume(State(state): State<AppState>) -> Response {
+    let next_volume = {
+        let reader = state.reader.read().await;
+        reader.current_volume + 1
     };
 
-    let idx = match *step {
-        ViewStep::Single(i) => i,
-        ViewStep::Spread { right, .. } => right,
+    let manga_dir = PathBuf::from(MANGA_ROOT).join(SELECTED_MANGA);
+    let volume_path = select_volume(list_volumes(manga_dir.as_path()), next_volume);
+
+    let pages = match chosen_volume(volume_path.as_path()) {
+        Ok(p) => p,
+        Err(err) => {
+            return (
+                StatusCode::NOT_FOUND,
+                format!("Could not load volume {next_volume}: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let steps = build_view_steps(&pages);
+
+    let mut reader = state.reader.write().await;
+    reader.current_volume = next_volume;
+    reader.pages = pages;
+    reader.steps = steps;
+    reader.current_step = 0;
+
+    (StatusCode::OK, format!("Switched to volume {next_volume}")).into_response()
+}
+
+async fn right_page_bytes(State(state): State<AppState>) -> Response {
+    let idx = {
+        let reader = state.reader.read().await;
+        let Some(step) = reader.steps.get(reader.current_step) else {
+            return (StatusCode::NOT_FOUND, "No step found").into_response();
+        };
+
+        match *step {
+            ViewStep::Single(i) => i,
+            ViewStep::Spread { right, .. } => right,
+        }
     };
 
     image_bytes_for_idx(&state, idx).await
 }
 
 async fn left_page_bytes(State(state): State<AppState>) -> Response {
-    let step_idx = *state.current_step.read().await;
+    let idx = {
+        let reader = state.reader.read().await;
+        let Some(step) = reader.steps.get(reader.current_step) else {
+            return (StatusCode::NOT_FOUND, "No step found").into_response();
+        };
 
-    let Some(step) = state.steps.get(step_idx) else {
-        return (StatusCode::NOT_FOUND, "No step found").into_response();
-    };
-
-    let idx = match *step {
-        ViewStep::Single(_) => {
-            return (StatusCode::NO_CONTENT, "No left page for this spread").into_response();
+        match *step {
+            ViewStep::Single(_) => {
+                return (StatusCode::NO_CONTENT, "No left page for this spread").into_response();
+            }
+            ViewStep::Spread { left, .. } => left,
         }
-        ViewStep::Spread { left, .. } => left,
     };
 
     image_bytes_for_idx(&state, idx).await
 }
 
 async fn image_bytes_for_idx(state: &AppState, idx: usize) -> Response {
-    let Some(page) = state.pages.get(idx) else {
-        return (StatusCode::NOT_FOUND, format!("no page found mud")).into_response();
+    let path = {
+        let reader = state.reader.read().await;
+        let Some(page) = reader.pages.get(idx) else {
+            return (StatusCode::NOT_FOUND, format!("no page found mud")).into_response();
+        };
+        page.path.clone()
     };
 
-    match fs::read(&page.path).await {
+    match fs::read(&path).await {
         Ok(bytes) => {
             let mut res = Response::new(Body::from(bytes));
             res.headers_mut()

@@ -1,34 +1,10 @@
-function setImageUrl(id, objectUrl) {
-  const img = document.getElementById(id);
-
-  if (img.dataset.url) {
-    URL.revokeObjectURL(img.dataset.url);
-    img.dataset.url = '';
-  }
-
-  if (!objectUrl) {
-    img.removeAttribute('src');
-    return;
-  }
-
-  img.dataset.url = objectUrl;
-  img.src = objectUrl;
-}
-
-async function fetchImage(url, allowNoContent = false) {
-  const res = await fetch(url);
-
-  if (allowNoContent && res.status === 204) {
-    return { noContent: true };
-  }
-
-  if (!res.ok) {
-    throw new Error(`Failed to fetch ${url}: ${res.status}`);
-  }
-
-  const bytes = await res.arrayBuffer();
-  const blob = new Blob([bytes], { type: 'image/jpeg' });
-  return { noContent: false, objectUrl: URL.createObjectURL(blob) };
+function preloadImage(url) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve({ ok: true, url });
+    img.onerror = () => resolve({ ok: false, url });
+    img.src = url;
+  });
 }
 
 function waitForImageLoad(img) {
@@ -40,31 +16,43 @@ function waitForImageLoad(img) {
 }
 
 async function loadSpread() {
-  const right = await fetchImage('/api/right');
-  const left = await fetchImage('/api/left', true);
+  const stamp = Date.now();
+  const rightUrl = `/api/right?v=${stamp}`;
+  const leftUrl = `/api/left?v=${stamp}`;
+
+  const [right, left] = await Promise.all([
+    preloadImage(rightUrl),
+    preloadImage(leftUrl),
+  ]);
+
+  if (!right.ok) {
+    throw new Error('Failed to load right page');
+  }
 
   const spreadView = document.getElementById('spreadView');
   const soloView = document.getElementById('soloView');
+  const leftPhoto = document.getElementById('leftPhoto');
+  const rightPhoto = document.getElementById('rightPhoto');
+  const soloPhoto = document.getElementById('soloPhoto');
 
-  if (left.noContent) {
+  if (!left.ok) {
     spreadView.style.display = 'none';
     soloView.style.display = 'flex';
 
-    setImageUrl('leftPhoto', null);
-    setImageUrl('rightPhoto', null);
-    setImageUrl('soloPhoto', right.objectUrl);
+    leftPhoto.removeAttribute('src');
+    rightPhoto.removeAttribute('src');
+    soloPhoto.src = right.url;
 
-    const solo = document.getElementById('soloPhoto');
-    await waitForImageLoad(solo);
-    const landscape = solo.naturalWidth > solo.naturalHeight;
-    solo.style.width = landscape ? '1050px' : '700px';
+    await waitForImageLoad(soloPhoto);
+    const landscape = soloPhoto.naturalWidth > soloPhoto.naturalHeight;
+    soloPhoto.style.width = landscape ? '1050px' : '700px';
   } else {
     soloView.style.display = 'none';
     spreadView.style.display = 'flex';
 
-    setImageUrl('soloPhoto', null);
-    setImageUrl('rightPhoto', right.objectUrl);
-    setImageUrl('leftPhoto', left.objectUrl);
+    soloPhoto.removeAttribute('src');
+    rightPhoto.src = right.url;
+    leftPhoto.src = left.url;
   }
 }
 
