@@ -1,10 +1,11 @@
 use axum::http::StatusCode;
 use std::{
+    env,
     io,
     path::{Path, PathBuf},
 };
 
-pub(crate) const MANGA_ROOT: &str = "/home/koushikk/MANGA";
+pub(crate) const DEFAULT_MANGA_ROOT: &str = "/home/koushikk/MANGA";
 
 #[derive(Clone, Copy)]
 pub(crate) enum ViewStep {
@@ -31,8 +32,9 @@ pub(crate) fn is_safe_name(name: &str) -> bool {
 
 pub(crate) fn list_available_manga() -> io::Result<Vec<String>> {
     let mut manga = Vec::new();
+    let root = manga_root();
 
-    for entry in std::fs::read_dir(MANGA_ROOT)? {
+    for entry in std::fs::read_dir(&root)? {
         let path = entry?.path();
         if !path.is_dir() {
             continue;
@@ -52,7 +54,7 @@ pub(crate) fn list_available_manga() -> io::Result<Vec<String>> {
 }
 
 pub(crate) fn manga_dir(name: &str) -> PathBuf {
-    PathBuf::from(MANGA_ROOT).join(name)
+    manga_root().join(name)
 }
 
 pub(crate) fn list_volumes_for_manga(name: &str) -> io::Result<Vec<PathBuf>> {
@@ -251,4 +253,12 @@ pub(crate) fn build_view_steps(pages: &[Page]) -> Vec<ViewStep> {
     }
 
     steps
+}
+
+fn manga_root() -> PathBuf {
+    env::var("MANGA_ROOT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MANGA_ROOT))
 }

@@ -7,16 +7,25 @@ Flow:
 
 `sendit -> yorknew backend -> frontend`
 
-## Hardcoded config (for now)
+## Config (environment variables)
 
-In `sendit.py`:
-- Backend WS: `ws://127.0.0.1:3000/hosting/ws?host_id=local`
-- Manga root: `/home/koushikk/MANGA/Usogui`
+- `SENDIT_BACKEND_WS` (default: `ws://127.0.0.1:3000/hosting/ws?host_id=local`)
+- `SENDIT_MANGA_ROOT` (default: `/home/koushikk/MANGA/Usogui`)
+- `SENDIT_HOST_ID` (default: `local`)
 
 ## Run
 
 ```bash
 cd /home/koushikk/yorknew/sendit
+uv run sendit
+```
+
+## Example (Tailscale to remote backend)
+
+```bash
+SENDIT_BACKEND_WS=ws://100.101.102.103:3000/hosting/ws?host_id=usogui-host \
+SENDIT_MANGA_ROOT=/mnt/d/MANGA/Usogui \
+SENDIT_HOST_ID=usogui-host \
 uv run sendit
 ```
 

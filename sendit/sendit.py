@@ -1,15 +1,15 @@
 import asyncio
 import base64
 import json
+import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import websockets
 
-# Hardcoded for now
-BACKEND_WS = "ws://127.0.0.1:3000/hosting/ws?host_id=local"
-MANGA_ROOT = "/home/koushikk/MANGA/Usogui"
-HELLO_HOST_ID = "local"
+DEFAULT_BACKEND_WS = "ws://127.0.0.1:3000/hosting/ws?host_id=local"
+DEFAULT_MANGA_ROOT = "/home/koushikk/MANGA/Usogui"
+DEFAULT_HELLO_HOST_ID = "local"
 CHUNK_SIZE = 64 * 1024
 RECONNECT_DELAY_SECONDS = 2
 
@@ -106,7 +106,7 @@ async def stream_file(
         await send_error(ws, request_id, f"stream failed: {exc}")
 
 
-async def run_forever(backend_ws: str, root: Path) -> None:
+async def run_forever(backend_ws: str, root: Path, hello_host_id: str) -> None:
     while True:
         try:
             print(f"hosting app root: {root}")
@@ -118,7 +118,7 @@ async def run_forever(backend_ws: str, root: Path) -> None:
                 ping_interval=20,
                 ping_timeout=20,
             ) as ws:
-                await send_json(ws, {"type": "hello", "host_id": HELLO_HOST_ID})
+                await send_json(ws, {"type": "hello", "host_id": hello_host_id})
 
                 async for raw in ws:
                     try:
@@ -147,10 +147,14 @@ async def run_forever(backend_ws: str, root: Path) -> None:
 
 
 def main() -> None:
-    root = Path(MANGA_ROOT).resolve()
+    backend_ws = os.getenv("SENDIT_BACKEND_WS", DEFAULT_BACKEND_WS)
+    manga_root = os.getenv("SENDIT_MANGA_ROOT", DEFAULT_MANGA_ROOT)
+    hello_host_id = os.getenv("SENDIT_HOST_ID", DEFAULT_HELLO_HOST_ID)
+
+    root = Path(manga_root).resolve()
     if not root.exists() or not root.is_dir():
         raise SystemExit(f"root path does not exist or is not a directory: {root}")
-    asyncio.run(run_forever(BACKEND_WS, root))
+    asyncio.run(run_forever(backend_ws, root, hello_host_id))
 
 
 if __name__ == "__main__":

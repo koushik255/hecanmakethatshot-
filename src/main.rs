@@ -14,7 +14,7 @@ use manga::{
     list_volumes_for_manga, load_volume_pages, map_io_error,
 };
 use relay::{RelayState, hosting_ws, stream_from_host, stream_image};
-use std::path::Path;
+use std::{env, path::Path};
 use tokio::fs;
 
 #[derive(serde::Serialize)]
@@ -62,6 +62,8 @@ struct PageQuery {
 #[tokio::main]
 async fn main() {
     let relay_state = RelayState::new();
+    let bind_addr =
+        env::var("BACKEND_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
 
     let app = Router::new()
         .route("/api/manga", get(list_manga))
@@ -80,11 +82,11 @@ async fn main() {
         .route("/api/read/{*path}", get(stream_image))
         .with_state(relay_state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+    let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
-        .expect("failed to bind to 127.0.0.1:3000");
+        .unwrap_or_else(|err| panic!("failed to bind to {bind_addr}: {err}"));
 
-    println!("Server running on http://127.0.0.1:3000");
+    println!("Server running on http://{bind_addr}");
 
     axum::serve(listener, app).await.expect("server crashed");
 }
