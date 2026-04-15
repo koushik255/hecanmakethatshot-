@@ -13,7 +13,10 @@ use manga::{
     ViewStep, build_view_steps, content_type_for_path, is_safe_name, list_available_manga, manga_dir,
     list_volumes_for_manga, load_volume_pages, map_io_error,
 };
-use relay::{RelayState, hosting_ws, stream_from_host, stream_image};
+use relay::{
+    RelayState, get_registered_manifest_pages, hosting_ws, stream_from_host, stream_image,
+    stream_page_by_id,
+};
 use std::{env, path::Path};
 use tokio::fs;
 
@@ -72,6 +75,7 @@ async fn main() {
             "/api/manga/{name}/volumes/{volume}/manifest",
             get(volume_manifest),
         )
+        .route("/api/page/{page_id}", get(page_image_by_id))
         .route(
             "/api/manga/{name}/volumes/{volume}/pages/{page}",
             get(page_image),
@@ -134,9 +138,41 @@ async fn list_manga_volumes(AxumPath(name): AxumPath<String>) -> Response {
     }
 }
 
-async fn volume_manifest(AxumPath((name, volume)): AxumPath<(String, usize)>) -> Response {
+async fn volume_manifest(
+    State(relay_state): State<RelayState>,
+    AxumPath((name, volume)): AxumPath<(String, usize)>,
+) -> Response {
     if !is_safe_name(&name) {
         return (StatusCode::BAD_REQUEST, "Invalid manga name").into_response();
+    }
+
+    if let Some(registered_pages) =
+        get_registered_manifest_pages(&relay_state, "local", &name, volume).await
+    {
+        let steps = build_steps_from_landscape_flags(
+            &registered_pages
+                .iter()
+                .map(|page| page.is_landscape)
+                .collect::<Vec<_>>(),
+        );
+
+        let manifest_pages: Vec<ManifestPage> = registered_pages
+            .iter()
+            .map(|page| ManifestPage {
+                index: page.index,
+                image_url: format!("/api/page/{}", page.page_id),
+                is_landscape: page.is_landscape,
+            })
+            .collect();
+
+        return axum::Json(VolumeManifest {
+            manga: name,
+            volume,
+            page_count: manifest_pages.len(),
+            pages: manifest_pages,
+            steps: to_manifest_steps(&steps),
+        })
+        .into_response();
     }
 
     let pages = match load_volume_pages(&name, volume) {
@@ -164,6 +200,13 @@ async fn volume_manifest(AxumPath((name, volume)): AxumPath<(String, usize)>) ->
         steps: to_manifest_steps(&steps),
     })
     .into_response()
+}
+
+async fn page_image_by_id(
+    State(relay_state): State<RelayState>,
+    AxumPath(page_id): AxumPath<String>,
+) -> Response {
+    stream_page_by_id(&relay_state, page_id).await
 }
 
 async fn page_image(
@@ -230,4 +273,37 @@ fn to_manifest_steps(steps: &[ViewStep]) -> Vec<ManifestStep> {
             ViewStep::Spread { right, left } => ManifestStep::Spread { right, left },
         })
         .collect()
+}
+
+fn build_steps_from_landscape_flags(landscape: &[bool]) -> Vec<ViewStep> {
+    let mut steps = Vec::new();
+    if landscape.is_empty() {
+        return steps;
+    }
+
+    let last = landscape.len() - 1;
+    let mut i = 0;
+
+    while i < landscape.len() {
+        let solo = i == 0 || i == last || landscape[i];
+
+        if solo {
+            steps.push(ViewStep::Single(i));
+            i += 1;
+            continue;
+        }
+
+        if i < last && i + 1 != last && !landscape[i + 1] {
+            steps.push(ViewStep::Spread {
+                right: i,
+                left: i + 1,
+            });
+            i += 2;
+        } else {
+            steps.push(ViewStep::Single(i));
+            i += 1;
+        }
+    }
+
+    steps
 }

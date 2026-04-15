@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -34,6 +35,113 @@ def sanitize_relative_path(raw: str) -> Path | None:
         return None
 
     return Path(*safe_parts)
+
+
+def is_image_file(path: Path) -> bool:
+    return path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+
+def content_type_for_path(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    if suffix == ".webp":
+        return "image/webp"
+    if suffix == ".gif":
+        return "image/gif"
+    return "application/octet-stream"
+
+
+def volume_number(path: Path) -> int:
+    try:
+        return int(path.name.rsplit("_", 1)[-1])
+    except ValueError:
+        return 2**31 - 1
+
+
+def read_sorted_volume_dirs(root: Path) -> list[Path]:
+    dirs = [entry for entry in root.iterdir() if entry.is_dir() and volume_number(entry) != 2**31 - 1]
+    return sorted(dirs, key=volume_number)
+
+
+def find_volume_root(manga_dir: Path) -> Path:
+    current = manga_dir
+    while True:
+        volumes = read_sorted_volume_dirs(current)
+        if volumes:
+            return current
+
+        child_dirs = sorted([entry for entry in current.iterdir() if entry.is_dir()])
+        if len(child_dirs) == 1:
+            current = child_dirs[0]
+            continue
+
+        raise FileNotFoundError(f"Could not find volume folders in {manga_dir}")
+
+
+def collect_images_recursive(dir_path: Path, out: list[Path]) -> None:
+    for entry in sorted(dir_path.iterdir()):
+        if entry.is_dir():
+            collect_images_recursive(entry, out)
+        elif entry.is_file() and is_image_file(entry):
+            out.append(entry)
+
+
+def chosen_volume(volume_dir: Path) -> list[Path]:
+    top_entries = sorted(list(volume_dir.iterdir()))
+    top_images = [entry for entry in top_entries if entry.is_file() and is_image_file(entry)]
+
+    if top_images:
+        return sorted(top_images)
+
+    nested: list[Path] = []
+    collect_images_recursive(volume_dir, nested)
+    return sorted(nested)
+
+
+def page_id_for(host_id: str, manga: str, volume: int, index: int, rel_path: str) -> str:
+    seed = f"{host_id}|{manga}|{volume}|{index}|{rel_path}".encode("utf-8")
+    digest = hashlib.sha256(seed).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def build_catalog(root: Path, host_id: str) -> tuple[str, list[dict[str, Any]], dict[str, Path]]:
+    manga = root.name
+    volume_root = find_volume_root(root)
+    volume_dirs = read_sorted_volume_dirs(volume_root)
+
+    volumes: list[dict[str, Any]] = []
+    page_lookup: dict[str, Path] = {}
+
+    for volume_index, volume_dir in enumerate(volume_dirs, start=1):
+        images = chosen_volume(volume_dir)
+        pages: list[dict[str, Any]] = []
+
+        for idx, image_path in enumerate(images):
+            rel = image_path.relative_to(root).as_posix()
+            page_id = page_id_for(host_id, manga, volume_index, idx, rel)
+
+            pages.append(
+                {
+                    "page_id": page_id,
+                    "index": idx,
+                    "is_landscape": False,
+                    "content_type": content_type_for_path(image_path),
+                }
+            )
+            page_lookup[page_id] = image_path
+
+        volumes.append(
+            {
+                "number": volume_index,
+                "label": volume_dir.name,
+                "pages": pages,
+            }
+        )
+
+    return manga, volumes, page_lookup
 
 
 async def send_json(ws: websockets.WebSocketClientProtocol, payload: dict[str, Any]) -> None:
@@ -72,6 +180,12 @@ async def stream_file(
         await send_error(ws, request_id, "path escaped root")
         return
 
+    await stream_bytes_for_path(ws, request_id, full_path)
+
+
+async def stream_bytes_for_path(
+    ws: websockets.WebSocketClientProtocol, request_id: str, full_path: Path
+) -> None:
     if not full_path.is_file():
         await send_error(ws, request_id, f"file not found: {full_path}")
         return
@@ -107,6 +221,8 @@ async def stream_file(
 
 
 async def run_forever(backend_ws: str, root: Path, hello_host_id: str) -> None:
+    manga, volumes, page_lookup = build_catalog(root, hello_host_id)
+
     while True:
         try:
             print(f"hosting app root: {root}")
@@ -119,6 +235,14 @@ async def run_forever(backend_ws: str, root: Path, hello_host_id: str) -> None:
                 ping_timeout=20,
             ) as ws:
                 await send_json(ws, {"type": "hello", "host_id": hello_host_id})
+                await send_json(
+                    ws,
+                    {
+                        "type": "register_catalog",
+                        "manga": manga,
+                        "volumes": volumes,
+                    },
+                )
 
                 async for raw in ws:
                     try:
@@ -127,17 +251,32 @@ async def run_forever(backend_ws: str, root: Path, hello_host_id: str) -> None:
                         print(f"invalid request payload: {exc}")
                         continue
 
-                    if msg.get("type") != "start_stream":
+                    msg_type = msg.get("type")
+                    if msg_type == "start_stream":
+                        request_id = msg.get("request_id")
+                        rel_path = msg.get("path")
+
+                        if not isinstance(request_id, str) or not isinstance(rel_path, str):
+                            print("invalid start_stream payload")
+                            continue
+
+                        await stream_file(ws, root, request_id, rel_path)
                         continue
 
-                    request_id = msg.get("request_id")
-                    rel_path = msg.get("path")
+                    if msg_type == "start_stream_by_id":
+                        request_id = msg.get("request_id")
+                        page_id = msg.get("page_id")
 
-                    if not isinstance(request_id, str) or not isinstance(rel_path, str):
-                        print("invalid start_stream payload")
-                        continue
+                        if not isinstance(request_id, str) or not isinstance(page_id, str):
+                            print("invalid start_stream_by_id payload")
+                            continue
 
-                    await stream_file(ws, root, request_id, rel_path)
+                        full_path = page_lookup.get(page_id)
+                        if full_path is None:
+                            await send_error(ws, request_id, f"page id not found: {page_id}")
+                            continue
+
+                        await stream_bytes_for_path(ws, request_id, full_path)
 
             print("backend disconnected")
         except Exception as exc:  # noqa: BLE001

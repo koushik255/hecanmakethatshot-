@@ -7,6 +7,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     io,
@@ -25,6 +26,7 @@ use crate::manga::content_type_for_path;
 #[derive(Clone)]
 pub(crate) struct RelayState {
     hosts: Arc<Mutex<HashMap<String, HostHandle>>>,
+    catalogs: Arc<Mutex<HashMap<String, HostCatalog>>>,
     next_id: Arc<AtomicU64>,
 }
 
@@ -34,10 +36,31 @@ struct HostHandle {
     pending: Arc<Mutex<HashMap<String, mpsc::Sender<Result<Bytes, String>>>>>,
 }
 
+#[derive(Clone)]
+struct HostCatalog {
+    mangas: HashMap<String, Vec<RegisteredVolume>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RegisteredPage {
+    pub(crate) page_id: String,
+    pub(crate) index: usize,
+    pub(crate) is_landscape: bool,
+    pub(crate) content_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RegisteredVolume {
+    pub(crate) number: usize,
+    pub(crate) label: String,
+    pub(crate) pages: Vec<RegisteredPage>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum BackendToHost {
     StartStream { request_id: String, path: String },
+    StartStreamById { request_id: String, page_id: String },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -50,6 +73,10 @@ enum HostToBackend {
         last: bool,
     },
     StreamError { request_id: String, error: String },
+    RegisterCatalog {
+        manga: String,
+        volumes: Vec<RegisteredVolume>,
+    },
 }
 
 #[derive(serde::Deserialize)]
@@ -68,6 +95,7 @@ impl RelayState {
     pub(crate) fn new() -> Self {
         Self {
             hosts: Arc::new(Mutex::new(HashMap::new())),
+            catalogs: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -139,6 +167,15 @@ async fn handle_host_socket(state: RelayState, host_id: String, socket: axum::ex
             HostToBackend::Hello { host_id: hello_id } => {
                 println!("hello from hosting app {hello_id}");
             }
+            HostToBackend::RegisterCatalog { manga, mut volumes } => {
+                volumes.sort_by_key(|v| v.number);
+
+                let mut catalogs = state.catalogs.lock().await;
+                let host_catalog = catalogs.entry(host_id.clone()).or_insert_with(|| HostCatalog {
+                    mangas: HashMap::new(),
+                });
+                host_catalog.mangas.insert(manga, volumes);
+            }
             HostToBackend::StreamChunk {
                 request_id,
                 data,
@@ -175,6 +212,10 @@ async fn handle_host_socket(state: RelayState, host_id: String, socket: axum::ex
     {
         let mut hosts = state.hosts.lock().await;
         hosts.remove(&host_id);
+    }
+    {
+        let mut catalogs = state.catalogs.lock().await;
+        catalogs.remove(&host_id);
     }
 
     pending.lock().await.clear();
@@ -214,27 +255,57 @@ pub(crate) async fn stream_from_host(state: &RelayState, host_id: String, path: 
 
     let host = {
         let hosts = state.hosts.lock().await;
+        resolve_host_handle(&hosts, &host_id)
+    };
 
-        hosts
-            .get(&host_id)
-            .cloned()
-            .or_else(|| {
-                if host_id == "local" {
-                    hosts
-                        .iter()
-                        .find(|(id, _)| id.starts_with("local/"))
-                        .map(|(_, handle)| handle.clone())
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                if hosts.len() == 1 {
-                    hosts.values().next().cloned()
-                } else {
-                    None
-                }
-            })
+    let Some(host) = host else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "hosting app not connected").into_response();
+    };
+
+    let body = match request_stream_body(
+        state,
+        &host,
+        BackendToHost::StartStream {
+            request_id: state.next_id.fetch_add(1, Ordering::Relaxed).to_string(),
+            path: path.clone(),
+        },
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(err) => return err.into_response(),
+    };
+
+    let mut response = Response::new(body);
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type_for_path(FsPath::new(&path))),
+    );
+    response
+}
+
+pub(crate) async fn get_registered_manifest_pages(
+    state: &RelayState,
+    requested_host_id: &str,
+    manga: &str,
+    volume: usize,
+) -> Option<Vec<RegisteredPage>> {
+    let resolved_host_id = resolve_host_id(state, requested_host_id).await?;
+    let catalogs = state.catalogs.lock().await;
+    let host_catalog = catalogs.get(&resolved_host_id)?;
+    let volumes = host_catalog.mangas.get(manga)?;
+    let selected = volumes.iter().find(|entry| entry.number == volume)?;
+    Some(selected.pages.clone())
+}
+
+pub(crate) async fn stream_page_by_id(state: &RelayState, page_id: String) -> Response {
+    let Some((host_id, content_type)) = find_page_owner(state, &page_id).await else {
+        return (StatusCode::NOT_FOUND, "page id not registered").into_response();
+    };
+
+    let host = {
+        let hosts = state.hosts.lock().await;
+        hosts.get(&host_id).cloned()
     };
 
     let Some(host) = host else {
@@ -242,34 +313,57 @@ pub(crate) async fn stream_from_host(state: &RelayState, host_id: String, path: 
     };
 
     let request_id = state.next_id.fetch_add(1, Ordering::Relaxed).to_string();
-    let (tx, mut rx) = mpsc::channel::<Result<Bytes, String>>(8);
+    let body = match request_stream_body(
+        state,
+        &host,
+        BackendToHost::StartStreamById {
+            request_id,
+            page_id,
+        },
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(err) => return err.into_response(),
+    };
 
+    let mut response = Response::new(body);
+    let content_type = HeaderValue::from_str(&content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, content_type);
+    response
+}
+
+async fn request_stream_body(
+    _state: &RelayState,
+    host: &HostHandle,
+    msg: BackendToHost,
+) -> Result<Body, (StatusCode, String)> {
+    let request_id = match &msg {
+        BackendToHost::StartStream { request_id, .. } => request_id.clone(),
+        BackendToHost::StartStreamById { request_id, .. } => request_id.clone(),
+    };
+
+    let (tx, mut rx) = mpsc::channel::<Result<Bytes, String>>(8);
     host.pending.lock().await.insert(request_id.clone(), tx);
 
-    if host
-        .outbound
-        .send(BackendToHost::StartStream {
-            request_id: request_id.clone(),
-            path: path.clone(),
-        })
-        .is_err()
-    {
+    if host.outbound.send(msg).is_err() {
         host.pending.lock().await.remove(&request_id);
-        return (StatusCode::BAD_GATEWAY, "hosting app send failed").into_response();
+        return Err((StatusCode::BAD_GATEWAY, "hosting app send failed".to_string()));
     }
 
     let first = match tokio::time::timeout(Duration::from_secs(8), rx.recv()).await {
         Ok(Some(Ok(chunk))) => chunk,
-        Ok(Some(Err(err))) => {
-            return (StatusCode::BAD_GATEWAY, format!("hosting app error: {err}")).into_response();
-        }
+        Ok(Some(Err(err))) => return Err((StatusCode::BAD_GATEWAY, format!("hosting app error: {err}"))),
         Ok(None) => {
             host.pending.lock().await.remove(&request_id);
-            return (StatusCode::BAD_GATEWAY, "hosting app closed stream").into_response();
+            return Err((StatusCode::BAD_GATEWAY, "hosting app closed stream".to_string()));
         }
         Err(_) => {
             host.pending.lock().await.remove(&request_id);
-            return (StatusCode::GATEWAY_TIMEOUT, "hosting app timeout").into_response();
+            return Err((StatusCode::GATEWAY_TIMEOUT, "hosting app timeout".to_string()));
         }
     };
 
@@ -279,15 +373,63 @@ pub(crate) async fn stream_from_host(state: &RelayState, host_id: String, path: 
         Err(err) => Err(io::Error::other(err)),
     });
 
-    let stream = first_stream.chain(rest_stream);
-    let body = Body::from_stream(stream);
+    Ok(Body::from_stream(first_stream.chain(rest_stream)))
+}
 
-    let mut response = Response::new(body);
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type_for_path(FsPath::new(&path))),
-    );
-    response
+async fn resolve_host_id(state: &RelayState, requested: &str) -> Option<String> {
+    let hosts = state.hosts.lock().await;
+    if hosts.contains_key(requested) {
+        return Some(requested.to_string());
+    }
+    if requested == "local" {
+        if let Some((id, _)) = hosts.iter().find(|(id, _)| id.starts_with("local/")) {
+            return Some(id.clone());
+        }
+    }
+    if hosts.len() == 1 {
+        return hosts.keys().next().cloned();
+    }
+    None
+}
+
+async fn find_page_owner(state: &RelayState, page_id: &str) -> Option<(String, String)> {
+    let catalogs = state.catalogs.lock().await;
+
+    for (host_id, host_catalog) in catalogs.iter() {
+        for volumes in host_catalog.mangas.values() {
+            for volume in volumes {
+                for page in &volume.pages {
+                    if page.page_id == page_id {
+                        return Some((host_id.clone(), page.content_type.clone()));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn resolve_host_handle(hosts: &HashMap<String, HostHandle>, host_id: &str) -> Option<HostHandle> {
+    hosts
+        .get(host_id)
+        .cloned()
+        .or_else(|| {
+            if host_id == "local" {
+                hosts
+                    .iter()
+                    .find(|(id, _)| id.starts_with("local/"))
+                    .map(|(_, handle)| handle.clone())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            if hosts.len() == 1 {
+                hosts.values().next().cloned()
+            } else {
+                None
+            }
+        })
 }
 
 fn sanitize_relative_path(input: &str) -> Option<PathBuf> {
