@@ -1,0 +1,22 @@
+[project]
+name = "sendit-hosting-app"
+version = "0.1.0"
+description = "Hosting app that serves local manga files to the yorknew backend over WebSocket"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "websockets>=12.0",
+]
+
+[project.scripts]
+sendit = "sendit:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = ["sendit.py"]
+
+[tool.hatch.build.targets.sdist]
+include = ["sendit.py", "README.md", "pyproject.toml"]

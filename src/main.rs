@@ -1,17 +1,19 @@
 mod manga;
+mod relay;
 
 use axum::{
     Router,
     body::Body,
-    extract::Path as AxumPath,
+    extract::{Path as AxumPath, Query, State},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
 };
 use manga::{
-    ViewStep, build_view_steps, content_type_for_path, is_safe_name, list_available_manga,
+    ViewStep, build_view_steps, content_type_for_path, is_safe_name, list_available_manga, manga_dir,
     list_volumes_for_manga, load_volume_pages, map_io_error,
 };
+use relay::{RelayState, hosting_ws, stream_from_host, stream_image};
 use std::path::Path;
 use tokio::fs;
 
@@ -52,8 +54,14 @@ struct VolumeManifest {
 }
 
 
+#[derive(serde::Deserialize)]
+struct PageQuery {
+    host_id: Option<String>,
+}
+
 #[tokio::main]
 async fn main() {
+    let relay_state = RelayState::new();
 
     let app = Router::new()
         .route("/api/manga", get(list_manga))
@@ -65,7 +73,12 @@ async fn main() {
         .route(
             "/api/manga/{name}/volumes/{volume}/pages/{page}",
             get(page_image),
-        );
+        )
+        .route("/hosting/ws", get(hosting_ws))
+        .route("/agent/ws", get(hosting_ws))
+        .route("/api/stream/{*path}", get(stream_image))
+        .route("/api/read/{*path}", get(stream_image))
+        .with_state(relay_state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
@@ -136,7 +149,7 @@ async fn volume_manifest(AxumPath((name, volume)): AxumPath<(String, usize)>) ->
         .enumerate()
         .map(|(idx, page)| ManifestPage {
             index: idx,
-            image_url: format!("/api/manga/{name}/volumes/{volume}/pages/{idx}"),
+            image_url: format!("/api/manga/{name}/volumes/{volume}/pages/{idx}?host_id=local"),
             is_landscape: page.is_landscape(),
         })
         .collect();
@@ -151,7 +164,11 @@ async fn volume_manifest(AxumPath((name, volume)): AxumPath<(String, usize)>) ->
     .into_response()
 }
 
-async fn page_image(AxumPath((name, volume, page)): AxumPath<(String, usize, usize)>) -> Response {
+async fn page_image(
+    State(relay_state): State<RelayState>,
+    AxumPath((name, volume, page)): AxumPath<(String, usize, usize)>,
+    Query(query): Query<PageQuery>,
+) -> Response {
     if !is_safe_name(&name) {
         return (StatusCode::BAD_REQUEST, "Invalid manga name").into_response();
     }
@@ -164,6 +181,23 @@ async fn page_image(AxumPath((name, volume, page)): AxumPath<(String, usize, usi
     let Some(selected_page) = pages.get(page) else {
         return (StatusCode::NOT_FOUND, "Page not found").into_response();
     };
+
+    if let Some(host_id) = query.host_id {
+        let manga_root = manga_dir(&name);
+        let rel = match selected_page.path.strip_prefix(&manga_root) {
+            Ok(p) => p,
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to build relative stream path",
+                )
+                    .into_response();
+            }
+        };
+
+        let rel_path = rel.to_string_lossy().replace('\\', "/");
+        return stream_from_host(&relay_state, host_id, rel_path).await;
+    }
 
     image_bytes_for_path(&selected_page.path).await
 }

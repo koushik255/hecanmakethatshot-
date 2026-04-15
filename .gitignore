@@ -1,6 +1,20 @@
 /target
 frontend/node_modules
 frontend/dist
-bookmarks.json 
+
+# Local app data
+bookmarks.json
 pagemarks.json
 next.txt
+
+# Python (sendit)
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+sendit/.python-version

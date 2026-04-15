@@ -41,6 +41,7 @@ export default function ReaderPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [topbarHidden, setTopbarHidden] = useState(false);
+  const [alignment, setAlignment] = useState('center');
 
   useEffect(() => {
     if (!manga || !volume) {
@@ -124,6 +125,27 @@ export default function ReaderPage() {
             </Link>
             <button
               type="button"
+              className={`secondary-button ${alignment === 'left' ? 'active' : ''}`}
+              onClick={() => setAlignment('left')}
+            >
+              Left Align
+            </button>
+            <button
+              type="button"
+              className={`secondary-button ${alignment === 'center' ? 'active' : ''}`}
+              onClick={() => setAlignment('center')}
+            >
+              Center
+            </button>
+            <button
+              type="button"
+              className={`secondary-button ${alignment === 'right' ? 'active' : ''}`}
+              onClick={() => setAlignment('right')}
+            >
+              Right Align
+            </button>
+            <button
+              type="button"
               className="reader-button"
               disabled={!hasNextVolume}
               onClick={handleNextVolume}
@@ -139,7 +161,7 @@ export default function ReaderPage() {
         {error ? <pre className="error-box">{error}</pre> : null}
 
         {!loading && !error && display?.kind === 'spread' ? (
-          <div className="spread-view">
+          <div className={`spread-view ${alignment === 'right' ? 'right-aligned' : ''} ${alignment === 'left' ? 'left-aligned' : ''}`}>
             <img
               src={display.left?.image_url}
               alt="Left page"
@@ -156,7 +178,7 @@ export default function ReaderPage() {
         ) : null}
 
         {!loading && !error && display?.kind === 'single' ? (
-          <div className="solo-view">
+          <div className={`solo-view ${alignment === 'right' ? 'right-aligned' : ''} ${alignment === 'left' ? 'left-aligned' : ''}`}>
             <img
               src={display.page?.image_url}
               alt="Solo page"
